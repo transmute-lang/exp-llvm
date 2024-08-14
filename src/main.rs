@@ -109,7 +109,7 @@ impl<'ctx> CodeGen<'ctx> {
             )
             .unwrap()
             .try_as_basic_value()
-            .expect_left("")
+            .unwrap_left()
             .into_int_value();
         let n_prev2 = self
             .builder
@@ -120,7 +120,7 @@ impl<'ctx> CodeGen<'ctx> {
             )
             .unwrap()
             .try_as_basic_value()
-            .expect_left("")
+            .unwrap_left
             .into_int_value();
         let n_next = self
             .builder
