@@ -1,3 +1,5 @@
+extern crate core;
+
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::execution_engine::{ExecutionEngine, JitFunction};
@@ -11,11 +13,6 @@ use inkwell::values::BasicMetadataValueEnum;
 use std::error::Error;
 use std::path::PathBuf;
 
-/// Convenience type alias for the `sum` function.
-///
-/// Calling this is innately `unsafe` because there's no guarantee it doesn't
-/// do `unsafe` operations internally.
-type SumFunc = unsafe extern "C" fn(u32, u32, u32) -> u32;
 type FiboFunc = unsafe extern "C" fn(u32) -> u32;
 
 struct CodeGen<'ctx> {
@@ -26,29 +23,7 @@ struct CodeGen<'ctx> {
 }
 
 impl<'ctx> CodeGen<'ctx> {
-    fn jit_compile_sum(&self) /*-> JitFunction<SumFunc>*/ {
-        let i32_type = self.context.i32_type();
-        let fn_type = i32_type.fn_type(&[i32_type.into(), i32_type.into(), i32_type.into()], false);
-        let function = self.module.add_function("sum", fn_type, None);
-        function.set_gc("shadow-stack");
-        let basic_block = self.context.append_basic_block(function, "entry");
-
-        self.builder.position_at_end(basic_block);
-
-        let x = function.get_nth_param(0).unwrap().into_int_value();
-        let y = function.get_nth_param(1).unwrap().into_int_value();
-        let z = function.get_nth_param(2).unwrap().into_int_value();
-
-        let sum = self.builder.build_int_add(x, y, "sum").unwrap();
-        let sum = self.builder.build_int_add(sum, z, "sum").unwrap();
-
-        self.builder.build_return(Some(&sum)).unwrap();
-
-        // let f: JitFunction<SumFunc> = unsafe { self.execution_engine.get_function("sum").unwrap() };
-        // ()
-    }
-
-    fn jit_compile_fibo(&self) /*-> JitFunction<FiboFunc>*/ {
+    fn compile_fibo(&self) {
         let i32_type = self.context.i32_type();
         let fn_type = i32_type.fn_type(&[i32_type.into()], false);
         let function = self.module.add_function("fibo", fn_type, None);
@@ -120,7 +95,7 @@ impl<'ctx> CodeGen<'ctx> {
             )
             .unwrap()
             .try_as_basic_value()
-            .unwrap_left
+            .unwrap_left()
             .into_int_value();
         let n_next = self
             .builder
@@ -128,10 +103,47 @@ impl<'ctx> CodeGen<'ctx> {
             .unwrap();
 
         self.builder.build_return(Some(&n_next)).unwrap();
-        //
-        // let f: JitFunction<SumFunc> = unsafe { self.execution_engine.get_function("fibo").unwrap() };
-        // // unsafe { self.execution_engine.get_function("fibo").unwrap() }
-        // ()
+    }
+
+    fn compile_user_main(&self) {
+        let void_type = self.context.void_type();
+        let i32_type = self.context.i32_type();
+
+        let fibo = self.module.get_function("fibo").unwrap();
+
+        let rustlib_print = self.module.add_function(
+            "rustlib_print",
+            void_type.fn_type(&[i32_type.into()], false),
+            None,
+        );
+
+        let fn_type = void_type.fn_type(&[], false);
+        let function = self.module.add_function("user_main", fn_type, None);
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+
+        let fibo_10 = self
+            .builder
+            .build_call(
+                fibo,
+                &[BasicMetadataValueEnum::IntValue(
+                    i32_type.const_int(10, false),
+                )],
+                "fibo(10)",
+            )
+            .unwrap()
+            .try_as_basic_value()
+            .unwrap_left();
+
+        self.builder
+            .build_call(
+                rustlib_print,
+                &[BasicMetadataValueEnum::IntValue(fibo_10.into_int_value())],
+                "fibo(10)",
+            )
+            .unwrap();
+
+        self.builder.build_return(None).unwrap();
     }
 }
 
@@ -165,43 +177,41 @@ fn main() -> Result<(), Box<dyn Error>> {
         execution_engine,
     };
 
-    codegen.jit_compile_fibo();
-    codegen.jit_compile_sum();
+    codegen.compile_fibo();
+    codegen.compile_user_main();
 
-    println!(
-        "\n==== LLVM IR:\n{}",
-        codegen.module.print_to_string().to_string()
-    );
-
-    let asm = target_machine
-        .write_to_memory_buffer(&codegen.module, FileType::Assembly)
+    codegen
+        .module
+        .print_to_file(
+            PathBuf::from(".".to_string())
+                .join("target")
+                .join("fibo.ll"),
+        )
         .unwrap();
-    println!("\n==== ASM:\n{}", String::from_utf8_lossy(asm.as_slice()));
+    target_machine
+        .write_to_file(
+            &codegen.module,
+            FileType::Assembly,
+            &PathBuf::from(".".to_string())
+                .join("target")
+                .join("fibo.asm"),
+        )
+        .unwrap();
 
-    let fibo: JitFunction<FiboFunc> = unsafe { codegen.execution_engine.get_function("fibo").unwrap() };
-    let sum: JitFunction<SumFunc> = unsafe { codegen.execution_engine.get_function("sum").unwrap() };
-
-    let x = 1u32;
-    let y = 2u32;
-    let z = 3u32;
+    let fibo: JitFunction<FiboFunc> =
+        unsafe { codegen.execution_engine.get_function("fibo").unwrap() };
 
     println!("JIT:");
     unsafe {
-        println!("sum({}, {}, {}) = {}", x, y, z, sum.call(x, y, z));
-        assert_eq!(sum.call(x, y, z), x + y + z);
-    }
-
-    let n = 10u32;
-    unsafe {
-        println!("fibo({}) = {}", n, fibo.call(n));
-        assert_eq!(fibo.call(n), 55);
+        println!("fibo(10) = {}", fibo.call(10u32));
+        assert_eq!(fibo.call(10u32), 55);
     }
 
     target_machine
         .write_to_file(
             &codegen.module,
             FileType::Object,
-            &PathBuf::new().join("target").join("sum.o"),
+            &PathBuf::new().join("target").join("fibo.o"),
         )
         .unwrap();
 

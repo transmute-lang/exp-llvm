@@ -3,5 +3,8 @@ name = "exp-llvm"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+members = ["rustlib"]
+
 [dependencies]
 inkwell = { version = "0.5.0", features = ["llvm18-0"] }
